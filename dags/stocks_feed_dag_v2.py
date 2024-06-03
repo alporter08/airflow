@@ -14,6 +14,18 @@ logger = logging.getLogger(__name__)
 
 base = ObjectStoragePath("s3://aws_default@alp-airflow/stocks_feed/")
 
+stocks_data_dtypes = {
+    "T": "string",
+    "v": "float64",
+    "vw": "float64",
+    "o": "float64",
+    "c": "float64",
+    "h": "float64",
+    "l": "float64",
+    "t": "int",
+    "n": "float64",
+}
+
 
 @dag(
     schedule=timedelta(days=1),
@@ -35,12 +47,7 @@ def stocks_feed_dag_v2():
         """
         Get stocks data from Polygon API. The data is saved as parquet.
         """
-        # import pandas as pd
-        # from stocks_feed import dataloader
 
-        # s = dataloader.Stock(
-        #     ticker="SYF", start_date=data_interval_start, end_date=data_interval_end
-        # )
         API_KEY = Variable.get("POLYGON_API_KEY")
 
         execution_date = str(kwargs["logical_date"].date())
@@ -64,14 +71,23 @@ def stocks_feed_dag_v2():
         return path
 
     @task
-    def make_parquet(path: ObjectStoragePath):
+    def make_parquet(path: ObjectStoragePath, **kwargs):
 
         import pandas as pd
 
+        start_date = str(kwargs["data_interval_start"].date())
+        formatted_date = start_date.format("YYYYMMDD")
+
         with path.open("r") as json_file:
             data = json.load(json_file)
-        df = pd.DataFrame(data["results"])
+        df = pd.DataFrame(data["results"]).astype(stocks_data_dtypes)
         print(df.head())
+        target_path = base / "daily_stocks_parquet" / f"{formatted_date}.parquet"
+        target_path.parent.mkdir(exist_ok=True)
+
+        logging.info("Saving to parquet: %s" % target_path)
+        with target_path.open("wb") as parquet_file:
+            df.to_parquet(parquet_file, index=False)
 
     obj_path = get_stocks_data()
     make_parquet(obj_path)
