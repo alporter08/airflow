@@ -8,29 +8,27 @@ import time
 from airflow.decorators import dag, task
 from airflow.io.path import ObjectStoragePath
 from airflow.models import Variable
-from airflow.example_dags.plugins.workday import AfterWorkdayTimetable
+from workday import AfterWorkdayTimetable
 
 logger = logging.getLogger(__name__)
 
 base = ObjectStoragePath("s3://aws_default@alp-airflow/stocks_feed/")
 
-stocks_data_dtypes = {
-    "T": "string",
-    "v": "float64",
-    "vw": "float64",
-    "o": "float64",
-    "c": "float64",
-    "h": "float64",
-    "l": "float64",
-    "t": "int",
-    "n": "float64",
-}
-
-index_data_dtypes = {}
-
 
 def process_stocks_data(path):
     import pandas as pd
+
+    stocks_data_dtypes = {
+        "T": "string",
+        "v": "float64",
+        "vw": "float64",
+        "o": "float64",
+        "c": "float64",
+        "h": "float64",
+        "l": "float64",
+        "t": "int",
+        "n": "float64",
+    }
 
     with path.open("r") as json_file:
         data = json.load(json_file)
@@ -39,8 +37,35 @@ def process_stocks_data(path):
     return df
 
 
+def process_index_data(path):
+    import pandas as pd
+
+    index_data_dtypes = {"date": "string", "value": "float64"}
+    with path.open("r") as json_file:
+        data = json.load(json_file)
+    df = pd.DataFrame(data["observations"])
+    df = (
+        df[df["value"] != "."]
+        .drop(["realtime_start", "realtime_end"], axis=1)
+        .astype(index_data_dtypes)
+        .rename(columns={"value": "close"})
+    )
+    print(df.head())
+    return df
+
+
+def save_df_to_parquet(df, subdir, fname, start_date):
+    formatted_date = start_date.format("YYYYMMDD")
+    target_path = base / subdir / f"{formatted_date}_{fname}.parquet"
+    target_path.parent.mkdir(exist_ok=True)
+
+    logging.info("Saving to parquet: %s" % target_path)
+    with target_path.open("wb") as parquet_file:
+        df.to_parquet(parquet_file, index=False)
+
+
 @dag(
-    schedule=timedelta(days=1),  # AfterWorkdayTimetable()
+    schedule=AfterWorkdayTimetable(),  # timedelta(days=1),  #
     start_date=pendulum.datetime(2024, 7, 26, tz="US/Eastern"),
     catchup=True,
     tags=["prod"],
@@ -109,22 +134,19 @@ def stocks_feed_dag_v2():
         return path
 
     @task
-    def make_parquet(path: ObjectStoragePath, **kwargs):
-
+    def make_parquet(path: ObjectStoragePath, source_data, **kwargs):
         start_date = str(kwargs["data_interval_start"].date())
-        formatted_date = start_date.format("YYYYMMDD")
-
-        df = process_stocks_data(path)
-        target_path = base / "daily_stocks_parquet" / f"{formatted_date}.parquet"
-        target_path.parent.mkdir(exist_ok=True)
-
-        logging.info("Saving to parquet: %s" % target_path)
-        with target_path.open("wb") as parquet_file:
-            df.to_parquet(parquet_file, index=False)
+        if source_data == "stocks":
+            df = process_stocks_data(path)
+            save_df_to_parquet(df, "daily_stocks_parquet", "daily_stocks", start_date)
+        elif source_data == "index":
+            df = process_index_data(path)
+            save_df_to_parquet(df, "fred_sp500_parquet", "fred_sp500", start_date)
 
     obj_path = get_stocks_data()
-    make_parquet(obj_path)
+    make_parquet(obj_path, "stocks")
     obj_path = get_index_data()
+    make_parquet(obj_path, "index")
 
 
 dag_object = stocks_feed_dag_v2()
